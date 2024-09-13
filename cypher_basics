@@ -1,0 +1,195 @@
+## What do you need to run the graph
+
+##1 - from each of the queries extract the data from redshift and keep
+##    the same name 
+    
+## 2 - for the companies nodes, you will need the Excel file that is
+## located at the same folder than this file 
+
+## 3 - run the commands in order 
+
+
+
+
+#### setting the unique constrains
+
+
+CREATE CONSTRAINT user FOR (user:User) REQUIRE user.user_id IS UNIQUE;
+
+
+CREATE CONSTRAINT app FOR (app:App) REQUIRE app.app_uuid IS UNIQUE;
+
+CREATE CONSTRAINT coupon FOR (coupon:Coupon) REQUIRE coupon.coupon_id IS UNIQUE;
+
+
+
+
+
+### creating the user nodes 
+
+LOAD CSV WITH HEADERS
+FROM 'file:///user_nodes.csv' AS row
+MERGE (user:User {user_id: row.user_id})
+
+
+### creating the app nodes 
+
+LOAD CSV WITH HEADERS
+FROM 'file:///companies_nodes.xlsx' AS row
+MERGE (app:App {app_id: row.app_uuid,
+                company_name: row.company_name,
+                address: row.address, 
+                biz_type_lv_1: row.place_type_1,
+                biz_type_lv_2: row.place_type_2})
+
+
+#### creating the coupon nodes 
+
+
+LOAD CSV WITH HEADERS
+FROM 'file:///coupons.csv' AS row
+MERGE (coupon:Coupon {coupon_id: row.coupon_id,
+                    coupon_titlle: row.title,
+                expiration_type: row.expire_type,
+                coupon_type_1: row.type, 
+                coupon_type_2: row.coupon_type_2,
+                coupon_validity_period: row.coupon_validity_period,
+                created_month: row.created_month})
+
+
+
+
+
+#### creating the connection between app and user 
+
+LOAD CSV WITH HEADERS FROM 'file:///user_app_connection.csv' AS row
+MATCH (user:User {user_id: row.user_id})
+MATCH (app:App {app_id: row.app_uuid})
+MERGE (user)-[app_registration:REGISTERED{
+    create_date: row.created_date,
+    created_month: row.created_month, 
+    creation_channel : row.rst_code}]->(app)
+
+#### creating the connection between app and coupon 
+
+LOAD CSV WITH HEADERS FROM 'file:///coupons.csv' AS row
+MATCH (coupon:Coupon {coupon_id: row.coupon_id})
+MATCH (app:App {app_id: row.app_uuid})
+MERGE (app)-[coupon_offer:OFFERED]->(coupon)
+
+###creating the connection between user and coupon creation 
+
+LOAD CSV WITH HEADERS FROM 'file:///coupon_creation.csv' as row
+
+MATCH (user:User{user_id:row.user_id})
+MATCH (coupon:Coupon {coupon_id:row.coupon_id})
+MERGE (user)-[coupon_creation:CREATED{
+                created_day: row.created_day, 
+                created_hour: row.created_hour,
+                day_of_week_created: row.day_of_week_created}]->(coupon)
+
+
+
+## creating the connection between user and coupon_usage 
+
+LOAD CSV WITH HEADERS FROM 'file:///coupon_usage.csv' as row
+MATCH (user:User {user_id :row.user_id})
+MATCH (coupon:Coupon {coupon_id:row.coupon_id})
+MERGE(user)-[coupon_usage:USED{
+                used_day: row.used_day, 
+                used_hour: row.used_hour,
+                day_of_week_used: row.day_of_week_used}]->(coupon)
+
+
+
+##### creating the invitation connection 
+
+LOAD CSV WITH HEADERS FROM 'file:///invitations.csv' as row
+
+MATCH (inviter:User {user_id: row.invite_user})
+MATCH (invited:User {user_id: row.invited_user})
+MERGE (inviter)-[invitation:INVITED {
+  invited_status: row.invited_status,
+  app: row.app_uuid}]->(invited);
+
+
+
+######3### Analitics 
+
+MATCH (inviter:User)-[INVITED]->(invited:User)
+RETURN inviter.user_id AS user_id, count(INVITED) AS degree
+ORDER BY degree DESC;
+
+MATCH (coupon1:Coupon)-[u:COMMON_USERS]->(coupon2:Coupon)
+WHERE u.weight > 9
+RETURN coupon1.coupon_id AS coupon_id, count(u) AS degree
+ORDER BY degree DESC;
+
+
+MATCH (inviter:User)-[invitation:INVITED]->(invited:User)
+OPTIONAL MATCH (inviter:User)-[invitation_use:USED]->(inviter_coupon:Coupon)
+OPTIONAL MATCH (invited:User)-[invited_use:USED]->(invited_coupon:Coupon)
+WHERE invitation.app = '982e6fa4-a760-4946-b082-26d363b05f01' AND invitation_use IS NOT NULL
+RETURN inviter, invitation, invited, inviter_coupon, invitation_use, invited_coupon, invited_use
+LIMIT 200;
+
+
+MATCH (inviter:User)-[invitation:INVITED]->(invited:User)
+OPTIONAL MATCH (inviter:User)-[invitation_use:USED]->(inviter_coupon:Coupon)
+OPTIONAL MATCH (invited:User)-[invited_use:USED]->(invited_coupon:Coupon)
+WHERE invitation.app = '982e6fa4-a760-4946-b082-26d363b05f01'
+RETURN inviter, invitation, invited, inviter_coupon, invitation_use, invited_coupon, invited_use
+LIMIT 200;
+
+
+#### MAKING THE BIPARTITDE GRAPH AND CONNECTION BETWEEN COUPONS 
+
+MATCH (user)-[:USED]->(coupon)
+WITH coupon, collect(DISTINCT user) AS users
+WITH collect({coupon: coupon, users: users}) AS couponData
+UNWIND couponData AS c1
+UNWIND couponData AS c2
+WITH c1.coupon AS coupon1, c2.coupon AS coupon2, c1.users AS users1, c2.users AS users2
+WHERE id(c1.coupon) < id(c2.coupon)  // Avoid duplicate combinations and self-connections
+WITH coupon1, coupon2, size([user IN users1 WHERE user IN users2]) AS commonUsers
+WHERE commonUsers > 0  // Only consider combinations with at least one common user
+
+MERGE (coupon1)-[common:COMMON_USERS]->(coupon2)
+ON CREATE SET common.weight = commonUsers
+ON MATCH SET common.weight = common.weight + commonUsers
+
+
+match (coupon1:Coupon)-[common:COMMON_USERS]-(coupon2:Coupon)
+return coupon1,common,coupon2
+
+
+
+MATCH (coupon1:Coupon)-[common:COMMON_USERS]-(coupon2:Coupon)
+MATCH (app:App)-[offers1:OFFERED]->(coupon1:Coupon)
+MATCH (app:App)-[offers2:OFFERED]->(coupon2:Coupon)
+WHERE app.company_name = '有限会社日基ホームズ'
+RETURN coupon1, common, coupon2,app
+
+
+
+## RELATIONSHIP BETWEEN USERS AND THE NUMBER OF 
+## COUPONS THEY USED 
+
+MATCH (user)-[:USED]->(coupon)
+WITH user, collect(DISTINCT coupon) AS coupons
+WITH collect({user: user, coupons: coupons}) AS userData
+UNWIND userData AS u1
+UNWIND userData AS u2
+WITH u1.user AS user1, u2.user AS user2, u1.coupons AS coupons1, u2.coupons AS coupons2
+WHERE id(user1) < id(user2)  // Avoid duplicate combinations and self-connections
+WITH user1, user2, size([coupon IN coupons1 WHERE coupon IN coupons2]) AS commonCoupons
+WHERE commonCoupons > 0  // Only consider combinations with at least one common coupon
+
+MERGE (user1)-[common:COMMON_COUPONS]-(user2)
+ON CREATE SET common.weight = commonCoupons
+ON MATCH SET common.weight = common.weight + commonCoupons
+
+RETURN user1, common, user2
+
+
+
